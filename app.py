@@ -6,8 +6,6 @@ import requests
 import numpy as np
 import pandas as pd
 import re
-import json
-from scipy.stats import linregress
 import time
 import threading
 
