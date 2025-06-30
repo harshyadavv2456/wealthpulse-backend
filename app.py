@@ -52,6 +52,27 @@ def load_mutual_fund_data():
 # Background thread for mutual funds
 threading.Thread(target=lambda: [load_mutual_fund_data(), time.sleep(86400)], daemon=True).start()
 
+# Get reliable stock price
+def get_reliable_price(ticker):
+    try:
+        # First try to get from fast_info
+        if ticker.fast_info and ticker.fast_info.last_price:
+            return ticker.fast_info.last_price, ticker.fast_info.previous_close
+        
+        # Fallback to history
+        hist = ticker.history(period="2d")
+        if len(hist) >= 2:
+            return hist['Close'].iloc[-1], hist['Close'].iloc[-2]
+        
+        # Last resort
+        return ticker.info['regularMarketPrice'], ticker.info['previousClose']
+    except:
+        try:
+            # Final attempt with different method
+            return ticker.info['currentPrice'], ticker.info['previousClose']
+        except:
+            return None, None
+
 # Market Overview Endpoint
 @app.route("/api/market-overview", methods=["GET"])
 def market_overview():
@@ -68,37 +89,60 @@ def market_overview():
         btc = yf.Ticker("BTC-USD")
         eth = yf.Ticker("ETH-USD")
         
+        # Get reliable prices
+        nifty_price, nifty_prev = get_reliable_price(nifty)
+        sensex_price, sensex_prev = get_reliable_price(sensex)
+        btc_price, btc_prev = get_reliable_price(btc)
+        eth_price, eth_prev = get_reliable_price(eth)
+        
+        # Calculate changes
+        def calculate_change(current, previous):
+            if current is None or previous is None:
+                return 0, 0
+            change = current - previous
+            change_percent = (change / previous) * 100
+            return change, change_percent
+        
+        nifty_change, nifty_change_percent = calculate_change(nifty_price, nifty_prev)
+        sensex_change, sensex_change_percent = calculate_change(sensex_price, sensex_prev)
+        btc_change, btc_change_percent = calculate_change(btc_price, btc_prev)
+        eth_change, eth_change_percent = calculate_change(eth_price, eth_prev)
+        
         # Format for INR
         def format_inr(value):
-            return f"₹{value:,.2f}" if value > 1000 else f"₹{value:.2f}"
+            if value is None:
+                return "N/A"
+            if value > 1000:
+                return f"₹{value:,.2f}"
+            return f"₹{value:.2f}"
         
         indices = [
             {
                 "name": "Nifty 50",
-                "value": nifty.fast_info.last_price,
-                "change": nifty.fast_info.last_price - nifty.fast_info.previous_close,
-                "change_percent": ((nifty.fast_info.last_price - nifty.fast_info.previous_close) / nifty.fast_info.previous_close) * 100,
+                "value": nifty_price,
+                "change": nifty_change,
+                "change_percent": nifty_change_percent,
                 "icon": "fas fa-chart-line"
             },
             {
                 "name": "SENSEX",
-                "value": sensex.fast_info.last_price,
-                "change": sensex.fast_info.last_price - sensex.fast_info.previous_close,
-                "change_percent": ((sensex.fast_info.last_price - sensex.fast_info.previous_close) / sensex.fast_info.previous_close) * 100,
+                "value": sensex_price,
+                "change": sensex_change,
+                "change_percent": sensex_change_percent,
                 "icon": "fas fa-chart-line"
             },
             {
                 "name": "Bitcoin",
-                "value": btc.fast_info.last_price * 83.5,  # Convert to INR
-                "change": (btc.fast_info.last_price - btc.fast_info.previous_close) * 83.5,
-                "change_percent": ((btc.fast_info.last_price - btc.fast_info.previous_close) / btc.fast_info.previous_close) * 100,
+                "value": btc_price * 83.5 if btc_price else None,  # Convert to INR
+                "change": (btc_change * 83.5) if btc_change else None,
+                "change_percent": btc_change_percent,
                 "icon": "fab fa-bitcoin"
             },
             {
                 "name": "Ethereum",
-                "value": eth.fast_info.last_price * 83.5,  # Convert to INR
-                "change": (eth.fast_info.last_price - eth.fast_info.previous_close) * 83.5,
-                "change_percent": ((eth.fast_info.last_price - eth.fast_info.previous_close) / eth.fast_info.previous_close) * 100,
+                "value": eth_price * 83.5 if eth_price else None,  # Convert to INR
+                "change": (eth_change * 83.5) if eth_change else None,
+                "change_percent": eth_change_percent,
                 "icon": "fab fa-ethereum"
             }
         ]
@@ -111,50 +155,96 @@ def market_overview():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Mutual Fund Detail Endpoint
+@app.route("/api/mf/<scheme_code>", methods=["GET"])
+def mutual_fund_detail(scheme_code):
+    try:
+        # Check cache first
+        if scheme_code in data_cache['mutual_funds']:
+            fund_data = data_cache['mutual_funds'][scheme_code]
+            
+            # Fetch NAV history
+            nav_response = requests.get(f'https://api.mfapi.in/mf/{scheme_code}')
+            if nav_response.status_code == 200:
+                nav_data = nav_response.json()
+                fund_data['nav_history'] = nav_data.get('data', [])
+                
+                # Calculate returns
+                returns = calculate_mf_returns(fund_data['nav_history'])
+                fund_data['returns'] = returns
+                
+                return jsonify(fund_data)
+        
+        return jsonify({"error": "Fund not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Calculate mutual fund returns
+def calculate_mf_returns(nav_history):
+    if not nav_history or len(nav_history) < 2:
+        return {}
+    
+    # Parse NAV data
+    parsed_nav = []
+    for entry in nav_history:
+        try:
+            date = datetime.strptime(entry['date'], '%d-%m-%Y')
+            nav = float(entry['nav'])
+            parsed_nav.append((date, nav))
+        except:
+            continue
+    
+    if not parsed_nav:
+        return {}
+    
+    # Sort by date
+    parsed_nav.sort(key=lambda x: x[0])
+    latest_date, latest_nav = parsed_nav[-1]
+    
+    # Calculate returns for different periods
+    periods = {
+        '1M': timedelta(days=30),
+        '3M': timedelta(days=90),
+        '6M': timedelta(days=180),
+        '1Y': timedelta(days=365),
+        '3Y': timedelta(days=3*365),
+        '5Y': timedelta(days=5*365)
+    }
+    
+    returns = {}
+    for period, delta in periods.items():
+        target_date = latest_date - delta
+        # Find closest date to target
+        closest = None
+        for date, nav in parsed_nav:
+            if date <= target_date:
+                closest = nav
+            else:
+                break
+        
+        if closest and closest > 0:
+            returns[period] = ((latest_nav - closest) / closest) * 100
+    
+    return returns
+
 # Top Mutual Funds Endpoint
 @app.route("/api/top-mf", methods=["GET"])
 def top_mf():
     try:
-        # For demo - would come from your MF data analysis
-        top_funds = [
-            {
-                "id": "120503",
-                "name": "Parag Parikh Flexi Cap Fund",
-                "category": "Flexi Cap",
-                "plan": "Direct Plan",
-                "option": "Growth",
-                "rating": "★★★★★",
-                "ratingClass": "excellent",
-                "ratingText": "Excellent",
-                "returns": [
-                    {"period": "1M", "value": 2.1},
-                    {"period": "3M", "value": 8.4},
-                    {"period": "6M", "value": 14.2},
-                    {"period": "1Y", "value": 24.5},
-                    {"period": "3Y", "value": 18.2},
-                    {"period": "5Y", "value": 15.8}
-                ]
-            },
-            {
-                "id": "100366",
-                "name": "SBI Small Cap Fund",
-                "category": "Small Cap",
-                "plan": "Direct Plan",
-                "option": "Growth",
-                "rating": "★★★★☆",
-                "ratingClass": "good",
-                "ratingText": "Good",
-                "returns": [
-                    {"period": "1M", "value": 1.8},
-                    {"period": "3M", "value": 7.2},
-                    {"period": "6M", "value": 16.5},
-                    {"period": "1Y", "value": 32.1},
-                    {"period": "3Y", "value": 24.8},
-                    {"period": "5Y", "value": 21.3}
-                ]
-            }
-        ]
-        return jsonify(top_funds)
+        # Get category from query params
+        category = request.args.get('category', 'equity')
+        
+        # For demo - real implementation would filter by category
+        top_funds = []
+        for code, fund in list(data_cache['mutual_funds'].items())[:5]:
+            # Fetch fund details
+            detail_response = mutual_fund_detail(code)
+            if detail_response.status_code == 200:
+                fund_data = detail_response.json
+                fund_data['id'] = code
+                top_funds.append(fund_data)
+        
+        return jsonify(top_funds[:2])  # Return top 2 for dashboard
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -162,40 +252,31 @@ def top_mf():
 @app.route("/api/top-stocks", methods=["GET"])
 def top_stocks():
     try:
-        top_stocks = [
-            {
-                "symbol": "RELIANCE.NS",
-                "name": "Reliance Industries",
-                "sector": "Energy",
+        # Predefined list of top Indian stocks
+        symbols = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "HINDUNILVR.NS"]
+        top_stocks = []
+        
+        for symbol in symbols[:2]:  # Only process first 2 for dashboard
+            stock = yf.Ticker(symbol)
+            info = stock.info
+            
+            # Get reliable price
+            price, prev_close = get_reliable_price(stock)
+            change = price - prev_close if price and prev_close else 0
+            change_percent = (change / prev_close) * 100 if prev_close else 0
+            
+            stock_data = {
+                "symbol": symbol,
+                "name": info.get('longName', symbol),
+                "sector": info.get('sector', ''),
                 "exchange": "NSE",
-                "price": 2845.50,
-                "change": 2.1,
-                "returns": [
-                    {"period": "1D", "value": 1.2},
-                    {"period": "1W", "value": 3.4},
-                    {"period": "1M", "value": 8.2},
-                    {"period": "3M", "value": 12.5},
-                    {"period": "1Y", "value": 24.8},
-                    {"period": "YTD", "value": 18.3}
-                ]
-            },
-            {
-                "symbol": "TCS.NS",
-                "name": "Tata Consultancy Services",
-                "sector": "IT Services",
-                "exchange": "NSE",
-                "price": 3450.75,
-                "change": 1.8,
-                "returns": [
-                    {"period": "1D", "value": 0.8},
-                    {"period": "1W", "value": 2.1},
-                    {"period": "1M", "value": 5.6},
-                    {"period": "3M", "value": 10.2},
-                    {"period": "1Y", "value": 18.7},
-                    {"period": "YTD", "value": 12.4}
-                ]
+                "price": price,
+                "change": change,
+                "change_percent": change_percent,
+                "returns": []  # Would be calculated from history
             }
-        ]
+            top_stocks.append(stock_data)
+        
         return jsonify(top_stocks)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -204,37 +285,101 @@ def top_stocks():
 @app.route("/api/top-crypto", methods=["GET"])
 def top_crypto():
     try:
-        top_crypto = [
-            {
-                "symbol": "BTC-USD",
-                "name": "Bitcoin",
-                "price": 5241300,
-                "change": -1.2,
-                "returns": [
-                    {"period": "1D", "value": -1.2},
-                    {"period": "1W", "value": 3.8},
-                    {"period": "1M", "value": 12.4},
-                    {"period": "3M", "value": 24.5},
-                    {"period": "1Y", "value": 85.2},
-                    {"period": "YTD", "value": 42.1}
-                ]
-            },
-            {
-                "symbol": "ETH-USD",
-                "name": "Ethereum",
-                "price": 281500,
-                "change": 0.78,
-                "returns": [
-                    {"period": "1D", "value": 0.5},
-                    {"period": "1W", "value": 2.8},
-                    {"period": "1M", "value": 9.4},
-                    {"period": "3M", "value": 18.2},
-                    {"period": "1Y", "value": 62.3},
-                    {"period": "YTD", "value": 31.7}
-                ]
+        symbols = ["BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD"]
+        top_crypto = []
+        
+        for symbol in symbols[:2]:  # Only process first 2 for dashboard
+            crypto = yf.Ticker(symbol)
+            info = crypto.info
+            
+            # Get reliable price
+            price, prev_close = get_reliable_price(crypto)
+            change = price - prev_close if price and prev_close else 0
+            change_percent = (change / prev_close) * 100 if prev_close else 0
+            
+            crypto_data = {
+                "symbol": symbol,
+                "name": info.get('name', symbol),
+                "price": price * 83.5 if price else None,  # Convert to INR
+                "change": change * 83.5 if change else None,
+                "change_percent": change_percent,
+                "returns": []  # Would be calculated from history
             }
-        ]
+            top_crypto.append(crypto_data)
+        
         return jsonify(top_crypto)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Mutual Fund Search Endpoint
+@app.route("/api/mf/search", methods=["GET"])
+def search_mf():
+    try:
+        query = request.args.get('query', '').lower()
+        results = []
+        
+        for code, fund in data_cache['mutual_funds'].items():
+            if query in fund['name'].lower():
+                results.append({
+                    "schemeCode": code,
+                    "name": fund['name'],
+                    "category": fund['category']
+                })
+        
+        return jsonify(results[:5])  # Return top 5 matches
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Security Detail Endpoint
+@app.route("/api/security/<symbol>", methods=["GET"])
+def security_detail(symbol):
+    try:
+        # Determine security type
+        if symbol.isdigit():
+            # Mutual fund
+            return mutual_fund_detail(symbol)
+        elif symbol.endswith('.NS'):
+            # Stock
+            stock = yf.Ticker(symbol)
+            info = stock.info
+            
+            # Get reliable price
+            price, prev_close = get_reliable_price(stock)
+            change = price - prev_close if price and prev_close else 0
+            change_percent = (change / prev_close) * 100 if prev_close else 0
+            
+            return jsonify({
+                "type": "stock",
+                "symbol": symbol,
+                "name": info.get('longName', symbol),
+                "price": price,
+                "change": change,
+                "change_percent": change_percent,
+                "sector": info.get('sector', ''),
+                "marketCap": info.get('marketCap', 0),
+                "peRatio": info.get('trailingPE', 0),
+                "dividendYield": info.get('dividendYield', 0)
+            })
+        else:
+            # Crypto
+            crypto = yf.Ticker(symbol)
+            info = crypto.info
+            
+            # Get reliable price
+            price, prev_close = get_reliable_price(crypto)
+            change = price - prev_close if price and prev_close else 0
+            change_percent = (change / prev_close) * 100 if prev_close else 0
+            
+            return jsonify({
+                "type": "crypto",
+                "symbol": symbol,
+                "name": info.get('name', symbol),
+                "price": price * 83.5 if price else None,  # Convert to INR
+                "change": change * 83.5 if change else None,
+                "change_percent": change_percent,
+                "marketCap": info.get('marketCap', 0),
+                "volume": info.get('volume', 0)
+            })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
