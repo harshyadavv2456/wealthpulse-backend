@@ -1,0 +1,21 @@
+# .gitignore
+
+# Environment files (never commit secrets!)
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Log files
+ai_logs.txt
+
+# Virtual environment
+venv/
+
+# Editor/IDE files
+.idea/
+.vscode/
+
+# System files
+.DS_Store
