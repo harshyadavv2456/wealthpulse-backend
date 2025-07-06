@@ -1,7 +1,7 @@
 import os
 import time
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
 import yfinance as yf
@@ -43,15 +43,22 @@ cache.init_app(app)
 def get_encryption_key():
     key = os.getenv('ENCRYPTION_KEY')
     if not key:
-        key = Fernet.generate_key().decode()
-        with open('.env', 'a') as env_file:
-            env_file.write(f'\nENCRYPTION_KEY={key}')
-        os.environ['ENCRYPTION_KEY'] = key
+        # Generate key only in development
+        if os.getenv('FLASK_ENV') != 'production':
+            key = Fernet.generate_key().decode()
+            os.environ['ENCRYPTION_KEY'] = key
+            app.logger.warning("Generated temporary ENCRYPTION_KEY for development")
+        else:
+            raise RuntimeError("ENCRYPTION_KEY missing in production")
     return key.encode()
 
 def encrypt_log_entry(content):
-    fernet = Fernet(get_encryption_key())
-    return fernet.encrypt(content.encode())
+    try:
+        fernet = Fernet(get_encryption_key())
+        return fernet.encrypt(content.encode())
+    except Exception as e:
+        app.logger.error(f"Encryption failed: {str(e)}")
+        return content.encode()  # Return plaintext if encryption fails
 
 def requires_disclaimer(query):
     investment_keywords = {'invest', 'stock', 'fund', 'buy', 'sell', 'crypto', 'portfolio'}
@@ -72,12 +79,15 @@ def get_reliable_price(symbol):
             return hist['Close'].iloc[-1], hist['Close'].iloc[-2]
         return None, None
     except Exception as e:
-        print(f"Error fetching price for {symbol}: {str(e)}")
+        app.logger.error(f"Price fetch error for {symbol}: {str(e)}")
         return None, None
 
 @AI_BREAKER
 def call_deepseek_api(payload):
     DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+    if not DEEPSEEK_API_KEY:
+        raise ValueError("DEEPSEEK_API_KEY missing")
+        
     DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -86,12 +96,6 @@ def call_deepseek_api(payload):
     response = requests.post(DEEPSEEK_URL, headers=headers, json=payload, timeout=15)
     response.raise_for_status()
     return response.json()
-
-# Cache system
-data_cache = {
-    'mutual_funds': {},
-    'market_overview': {'last_updated': None, 'data': None}
-}
 
 # Routes
 @app.route("/")
@@ -132,16 +136,22 @@ def market_overview():
         
         return jsonify(indices)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Market overview error")
+        return jsonify({"error": "Market data unavailable"}), 500
 
 @app.route("/api/ai-assistant", methods=["POST"])
-@cache.cached(timeout=3600, make_cache_key=lambda: request.json.get('query', ''))
 def ai_assistant():
     try:
         data = request.json
         query = data.get("query", "").strip().lower()
         if not query:
             return jsonify({"response": "Please enter a question."})
+        
+        # Check cache first
+        cache_key = f"ai_response:{query}"
+        cached_response = cache.get(cache_key)
+        if cached_response:
+            return jsonify({"response": cached_response})
         
         # Prepare DeepSeek payload
         system_prompt = (
@@ -168,16 +178,23 @@ def ai_assistant():
             ai_response += "\n\n*Disclaimer: This is not investment advice. Please consult a SEBI-registered advisor before acting on this information.*"
         
         # Encrypt and log
-        log_entry = f"[{datetime.now()}] Query: {query}\nResponse: {ai_response}\n"
-        encrypted_log = encrypt_log_entry(log_entry)
-        with open("ai_logs.txt", "ab") as log_file:
-            log_file.write(encrypted_log + b'\n')
+        try:
+            log_entry = f"[{datetime.now()}] Query: {query}\nResponse: {ai_response}\n"
+            encrypted_log = encrypt_log_entry(log_entry)
+            with open("ai_logs.txt", "ab") as log_file:
+                log_file.write(encrypted_log + b'\n')
+        except Exception as e:
+            app.logger.error(f"Logging failed: {str(e)}")
+        
+        # Cache response
+        cache.set(cache_key, ai_response, timeout=3600)
         
         return jsonify({"response": ai_response})
     except pybreaker.CircuitBreakerError:
         return jsonify({"response": "AI assistant is temporarily unavailable. Please try again shortly."}), 503
     except Exception as e:
-        return jsonify({"response": f"Error: {str(e)}"}), 500
+        app.logger.exception("AI assistant error")
+        return jsonify({"response": "Sorry, I encountered an error processing your request"}), 500
 
 @app.route("/api/ai-assistant/health", methods=["GET"])
 def ai_health_check():
@@ -213,4 +230,4 @@ def ai_health_check():
 # ... [Include your existing endpoints] ...
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=os.getenv('FLASK_ENV') != 'production')
