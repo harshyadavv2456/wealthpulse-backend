@@ -226,8 +226,5 @@ def ai_health_check():
             "error": str(e)
         }), 500
 
-# Other endpoints (top-stocks, security-detail, etc.) go here
-# ... [Include your existing endpoints] ...
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=os.getenv('FLASK_ENV') != 'production')
