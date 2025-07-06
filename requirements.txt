@@ -1,13 +1,17 @@
 Flask==2.3.2
-Flask-Cors==4.0.0  # Upgraded for better CORS handling
+Flask-Cors==4.0.0
 yfinance==0.2.18
-pandas==2.0.3       # Upgraded for better performance and bug fixes
-numpy==1.24.4       # Upgraded for security and compatibility
-requests==2.31.0    # Upgraded for security fixes
-scipy==1.11.2       # Upgraded for better statistical functions
-gunicorn==21.2.0    # Upgraded production server
-python-dotenv==1.0.0  # For environment variables
-cachetools==5.3.1   # For advanced caching
-beautifulsoup4==4.12.2  # For potential web scraping fallbacks
-lxml==4.9.3         # HTML parsing for BS4
-nsetools==1.1.6     # Alternative Indian market data source
+pandas==2.0.3
+numpy==1.24.4
+requests==2.31.0
+scipy==1.11.2
+gunicorn==21.2.0
+python-dotenv==1.0.0
+cachetools==5.3.1
+beautifulsoup4==4.12.2
+lxml==4.9.3
+nsetools==1.1.6
+pybreaker==2.0.0
+flask-caching==2.0.2
+redis==5.0.1
+cryptography==42.0.5
