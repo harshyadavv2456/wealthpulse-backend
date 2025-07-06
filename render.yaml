@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: wealthpulse-backend
+    env: python
+    region: mumbai
+    buildCommand: 
+      - pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 4 --timeout 30 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        value: your_deepseek_api_key_here
+      - key: ENCRYPTION_KEY
+        value: your_encryption_key_here
+      - key: REDIS_URL
+        value: ${REDIS_INTERNAL_URL}
+      - key: AI_FAILURE_THRESHOLD
+        value: "3"
