@@ -8,10 +8,12 @@ services:
     startCommand: gunicorn app:app --workers 4 --timeout 30 --bind 0.0.0.0:$PORT
     envVars:
       - key: DEEPSEEK_API_KEY
-        value: your_deepseek_api_key_here
+        value: sk-2d542a0b8e0143c7b626427430e05c3c  # Your API key
       - key: ENCRYPTION_KEY
-        value: your_encryption_key_here
+        value: ${ENCRYPTION_KEY}  # Generate and add in Render dashboard
       - key: REDIS_URL
         value: ${REDIS_INTERNAL_URL}
       - key: AI_FAILURE_THRESHOLD
         value: "3"
+      - key: FLASK_ENV
+        value: production
